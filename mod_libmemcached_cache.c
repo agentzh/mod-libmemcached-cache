@@ -18,7 +18,7 @@ module AP_MODULE_DECLARE_DATA libmemcached_cache_module;
 static char* serialize_table(apr_pool_t *p, apr_table_t *table);
 static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_table_t *table);
 
-static apr_status_t open_entity(cache_handle_t *h, request_rec *r, const char *key);
+static int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r);
 static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p, apr_bucket_brigade *bb);
 
@@ -26,7 +26,8 @@ static apr_status_t create_entity(cache_handle_t *h, request_rec *r, const char 
 static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info *info);
 static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb);
 
-static apr_status_t remove_entity(cache_handle_t *h);
+static int remove_entity(cache_handle_t *h);
+static int remove_url(cache_handle_t *h, apr_pool_t *p);
 
 /* global cache conf object */
 static libmem_cache_conf_t *sconf;
@@ -53,32 +54,29 @@ static char* serialize_table(apr_pool_t *p, apr_table_t *table) {
             iov[k].iov_base = elts[i].val;
             iov[k].iov_len = strlen(elts[i].val);
             k++;
-            iov[k].iov_base = CRLF;
-            iov[k].iov_len = sizeof(CRLF) - 1;
+            iov[k].iov_base = "\n";
+            iov[k].iov_len = 1;
             k++;
         }
     }
-    iov[k].iov_base = CRLF;
-    iov[k].iov_len = sizeof(CRLF) - 1;
+    iov[k].iov_base = "\n";
+    iov[k].iov_len = 1;
     k++;
     return apr_pstrcatv(p, iov, k, NULL);
 }
 
 static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_table_t *table) {
-    char *l, *w, *ww;
-    for (w = buf; w - buf < buf_size; w = ww + 1) {
-        if ((ww = strchr(w, '\n')) != NULL) {
-            if (*(ww - 1) == CR) {
-                *(ww - 1) = '\0';
-            }
-            *ww = '\0';
+    char *l, *w, *eol;
+    for (w = buf; *w != '\0'; w = eol + 1) {
+        if ((eol = strchr(w, '\n')) != NULL) {
+            *eol = '\0';
         } else {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-              "libmemcached_cache: Bad header from the cache: missing terminal CRLF.");
+              "libmemcached_cache: Bad header from the cache: missing terminal newline: %s", w);
             return NULL;
         }
-        if (*w == '\0') { /* found the terminal CRLF where w == ww - 1 */
-            return ww + 1;
+        if (*w == '\0') { /* found the terminal CRLF where w == eol */
+            return eol + 1;
         }
 
         if (!(l = strchr(w, ':'))) {
@@ -94,6 +92,149 @@ static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_tabl
         }
     }
     return w;
+}
+
+static apr_status_t free_pointer (void* p) {
+    free(p);
+    return APR_SUCCESS;
+}
+
+static char* parse_cache_info(request_rec *r, char *buf, cache_info* info) {
+    char *l, *w, *eol;
+    for (w = buf; *w != '\0'; w = eol + 1) {
+        if ((eol = strchr(w, '\n')) != NULL) {
+            *eol = '\0';
+        } else {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+              "libmemcached_cache: Bad cache info line from the cache: missing terminal newline: %s", w);
+            return NULL;
+        }
+        if (*w == '\0') { /* found the terminal CRLF where w == eol */
+            return eol + 1;
+        }
+
+        if (!(l = strchr(w, ':'))) {
+            /* ignore loudly */
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+              "libmemcached_cache: Ignored bad header from the cache: %s", w);
+        } else {
+            *l++ = '\0';
+            while (*l && apr_isspace(*l)) {
+                ++l;
+            }
+            if (strcmp(w, "status") == 0) {
+                info->status = atoi(l);
+            } else if (strcmp(w, "date") == 0) {
+                info->date = apr_atoi64(l);
+            } else if (strcmp(w, "expire") == 0) {
+                info->expire = apr_atoi64(l);
+            } else if (strcmp(w, "request_time") == 0) {
+                info->request_time = apr_atoi64(l);
+            } else if (strcmp(w, "response_time") == 0) {
+                info->response_time = apr_atoi64(l);
+            } else {
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                  "libmemcached_cache: Unknown cache info field: %s (Only 'status', 'date', 'expire', 'request_time', and 'response_time' are expected.)", w);
+                return NULL;
+
+            }
+        }
+    }
+    return w;
+}
+
+static char* serialize_cache_info(apr_pool_t *p, cache_info* info) {
+    return apr_pstrcat(
+        p,
+        apr_psprintf(p, "status: %d\n", info->status),
+        apr_psprintf(p, "date: " APR_TIME_T_FMT "\n", info->date),
+        apr_psprintf(p, "expire: " APR_TIME_T_FMT "\n", info->expire),
+        apr_psprintf(p, "request_time: " APR_TIME_T_FMT "\n", info->request_time),
+        apr_psprintf(p, "response: " APR_TIME_T_FMT "\n\n", info->response_time),
+        NULL);
+}
+
+static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
+    cache_object_t *obj;
+    cache_info *info;
+    libmem_cache_object_t *lobj;
+    memcached_return rc;
+    char *keys[2];
+    size_t key_len[2];
+    uint32_t flags;
+    unsigned int count;
+    char ret_key[MEMCACHED_MAX_KEY];
+    size_t ret_key_len, ret_val_len;
+    char *ret_val;
+
+    h->cache_obj = obj = apr_pcalloc(r->pool, sizeof(*obj));
+    obj->vobj = lobj = apr_pcalloc(r->pool, sizeof(*lobj));
+    info = &(obj->info);
+    //lobj->key = md5(key);
+
+    keys[0] = apr_pstrcat(r->pool, key, ".header", NULL);
+    key_len[0] = strlen(keys[0]);
+
+    keys[1] = apr_pstrcat(r->pool, key, ".data", NULL);
+    key_len[1] = strlen(keys[1]);
+
+    if (sconf->lock) {
+        apr_thread_mutex_lock(sconf->lock);
+    }
+
+    rc = memcached_mget(sconf->memc, keys, key_len, 2);
+    if (rc != MEMCACHED_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Failed to call memcached_mget: %s",
+                memcached_strerror(sconf->memc, rc));
+
+        if (sconf->lock) {
+            apr_thread_mutex_unlock(sconf->lock);
+        }
+
+        return DECLINED;
+    }
+
+    count = 0;
+    while ((ret_val = memcached_fetch(sconf->memc, ret_key, &ret_key_len,
+                &ret_val_len, &flags, &rc))) {
+        count++;
+        apr_pool_cleanup_register(r->pool, ret_val, free_pointer, apr_pool_cleanup_null);
+        ret_val[ret_val_len - 1] = '\0'; /* prevent memory overflow */
+        if (ret_key_len == key_len[0]) {
+            /* Found the header file */
+            char *p = parse_cache_info(r, ret_val, info);
+            if (p == NULL) {
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                        "libmemcached_cache: Failed to parse the info record in the header file.");
+                continue;
+            }
+            lobj->hdrs_str = p;
+        } else if (ret_key_len == key_len[1]) {
+            /* Found the data file */
+            lobj->body = ret_val;
+        } else {
+            ret_key[ret_key_len - 1] = '\0';
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                    "libmemcached_cache: Unknown key returned: %s", ret_key);
+        }
+    }
+    if (count > 0 && count != 2) {
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Found %d components for url %s but two was expected.", count, key);
+
+        if (sconf->lock) {
+            apr_thread_mutex_unlock(sconf->lock);
+        }
+
+        return DECLINED;
+    }
+
+    if (sconf->lock) {
+        apr_thread_mutex_unlock(sconf->lock);
+    }
+
+    return OK;
 }
 
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
@@ -129,12 +270,38 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
     return APR_SUCCESS;
 }
 
+static apr_status_t create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len) {
+    cache_object_t *obj;
+    libmem_cache_object_t *lobj;
+
+    h->cache_obj = obj = apr_pcalloc(r->pool, sizeof(*obj));
+    obj->vobj = lobj = apr_pcalloc(r->pool, sizeof(*lobj));
+    obj->key = apr_pstrdup(r->pool, key);
+    //lobj->key = md5(obj->key);
+
+    if (len == -1) {
+        len = sconf->max_streaming_buffer_size;
+    }
+    if (len < sconf->min_cache_object_size ||
+            len > sconf->max_cache_object_size) {
+        ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server,
+                "libmemcached_cache: URL %s failed the size check and will not be cached.", key);
+        return DECLINED;
+    }
+    lobj->body_len = len + 1; /* preserve the last byte for '\0' */
+    return OK;
+}
+
 static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info *info) {
     apr_status_t rv;
     libmem_cache_object_t *lobj = (libmem_cache_object_t *) h->cache_obj->vobj;
-    char *resp_hdrs_str, *req_hdrs_str;
+    char *cache_info_str = NULL, *resp_hdrs_str = NULL, *req_hdrs_str = NULL;
+    char *key;
 
     h->cache_obj->info = *info;
+
+    cache_info_str = serialize_cache_info(r->pool, info);
+
 
     /* we no longer store cache info in our storage */
     /*
@@ -168,13 +335,12 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
         }
     }
 
-    lobj->hdrs_str = apr_pstrcat(r->pool, resp_hdrs_str, req_hdrs_str, NULL);
-    if (lobj->body != NULL) {
-        /* we should avoid copying body here */
-        rv = store_pair(r, lobj->key, apr_pstrcat(r->pool, lobj->hdrs_str, lobj->body));
-        if (rv != APR_SUCCESS) {
-            return rv;
-        }
+    lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, resp_hdrs_str, req_hdrs_str, NULL);
+    key = apr_pstrcat(r->pool, lobj->key, ".header", NULL);
+
+    rv = store_pair(r, key, lobj->hdrs_str);
+    if (rv != APR_SUCCESS) {
+        return rv;
     }
     return APR_SUCCESS;
 }
@@ -338,7 +504,12 @@ static int libmem_cache_post_config(apr_pool_t *p, apr_pool_t *plog,
 }
 
 static int remove_url(cache_handle_t *h, apr_pool_t *p) {
-    /* stub */
+    /* XXX: stub */
+    return OK;
+}
+
+static int remove_entity(cache_handle_t *h) {
+    /* XXX: stub */
     return OK;
 }
 
