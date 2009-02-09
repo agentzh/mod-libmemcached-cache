@@ -291,6 +291,21 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
     return APR_SUCCESS;
 }
 
+static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p, apr_bucket_brigade *bb) {
+    apr_bucket *b;
+    libmem_cache_object_t *lobj = (libmem_cache_object_t*) h->cache_obj->vobj;
+
+    b = apr_bucket_immortal_create(
+            lobj->body, lobj->body_len - 1 /* exclude terminal '\0' */,
+            bb->bucket_alloc);
+
+    APR_BRIGADE_INSERT_TAIL(bb, b);
+    b = apr_bucket_eos_create(bb->bucket_alloc);
+    APR_BRIGADE_INSERT_TAIL(bb, b);
+
+    return APR_SUCCESS;
+}
+
 static apr_status_t create_entity(cache_handle_t *h, request_rec *r, const char *key, apr_off_t len) {
     cache_object_t *obj;
     libmem_cache_object_t *lobj;
