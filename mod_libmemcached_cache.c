@@ -44,7 +44,13 @@ static libmem_cache_conf_t *sconf;
 
 static apr_status_t store_pair(request_rec *r, char *key, char *value, size_t value_len, cache_info* info) {
     memcached_return rc;
-    time_t expire = info->expire / MSEC_ONE_SEC;
+    time_t expire = (time_t) (info->expire / MSEC_ONE_SEC);
+    if (expire < 0) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "Expire seconds overflown (%" APR_TIME_T_FMT ")",
+                (info->expire / MSEC_ONE_SEC));
+        return APR_EGENERAL;
+    }
 
     if (sconf->lock) {
         apr_thread_mutex_lock(sconf->lock);
@@ -52,9 +58,9 @@ static apr_status_t store_pair(request_rec *r, char *key, char *value, size_t va
 
     //rc = memcached_set(sconf->memc, key, strlen(key), "hello", 6,
             //expire, (uint32_t)0);
-    DDD("Adding abc : hello");
-    rc = memcached_set(sconf->memc, "abc", strlen("abc"), "hello", 6,
-            (time_t)30, (uint32_t)0);
+    DDD(apr_psprintf(r->pool, "key: %s  value: %s", key, value))
+    rc = memcached_set(sconf->memc, key, strlen(key), value, value_len,
+            expire, (uint32_t)0);
 
     if (sconf->lock) {
         apr_thread_mutex_unlock(sconf->lock);
@@ -90,13 +96,13 @@ static char* serialize_table(apr_pool_t *p, apr_table_t *table) {
             iov[k].iov_base = elts[i].val;
             iov[k].iov_len = strlen(elts[i].val);
             k++;
-            iov[k].iov_base = "\n";
-            iov[k].iov_len = 1;
+            iov[k].iov_base = CRLF;
+            iov[k].iov_len = sizeof(CRLF) - 1;
             k++;
         }
     }
-    iov[k].iov_base = "\n";
-    iov[k].iov_len = 1;
+    iov[k].iov_base = CRLF;
+    iov[k].iov_len = sizeof(CRLF) - 1;
     k++;
     return apr_pstrcatv(p, iov, k, NULL);
 }
@@ -104,14 +110,15 @@ static char* serialize_table(apr_pool_t *p, apr_table_t *table) {
 static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_table_t *table) {
     char *l, *w, *eol;
     for (w = buf; *w != '\0'; w = eol + 1) {
-        if ((eol = strchr(w, '\n')) != NULL) {
+        if ((eol = strstr(w, CRLF)) != NULL) {
+            *eol++ = '\0';
             *eol = '\0';
         } else {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
               "libmemcached_cache: Bad header from the cache: missing terminal newline: %s", w);
             return NULL;
         }
-        if (*w == '\0') { /* found the terminal CRLF where w == eol */
+        if (*w == '\0') { /* found the terminal CRLF where w == eol - 1 */
             return eol + 1;
         }
 
@@ -138,14 +145,15 @@ static apr_status_t free_pointer (void* p) {
 static char* parse_cache_info(request_rec *r, char *buf, cache_info* info) {
     char *l, *w, *eol;
     for (w = buf; *w != '\0'; w = eol + 1) {
-        if ((eol = strchr(w, '\n')) != NULL) {
+        if ((eol = strstr(w, CRLF)) != NULL) {
+            *eol++ = '\0';
             *eol = '\0';
         } else {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
               "libmemcached_cache: Bad cache info line from the cache: missing terminal newline: %s", w);
             return NULL;
         }
-        if (*w == '\0') { /* found the terminal CRLF where w == eol */
+        if (*w == '\0') { /* found the terminal CRLF where w == eol - 1 */
             return eol + 1;
         }
 
@@ -158,6 +166,7 @@ static char* parse_cache_info(request_rec *r, char *buf, cache_info* info) {
             while (*l && apr_isspace(*l)) {
                 ++l;
             }
+            DDD(apr_psprintf(r->pool, "cache_info: key: %s value: %s", w, l))
             if (strcmp(w, "status") == 0) {
                 info->status = atoi(l);
             } else if (strcmp(w, "date") == 0) {
@@ -182,11 +191,11 @@ static char* parse_cache_info(request_rec *r, char *buf, cache_info* info) {
 static char* serialize_cache_info(apr_pool_t *p, cache_info* info) {
     return apr_pstrcat(
         p,
-        apr_psprintf(p, "status: %d\n", info->status),
-        apr_psprintf(p, "date: " APR_TIME_T_FMT "\n", info->date),
-        apr_psprintf(p, "expire: " APR_TIME_T_FMT "\n", info->expire),
-        apr_psprintf(p, "request_time: " APR_TIME_T_FMT "\n", info->request_time),
-        apr_psprintf(p, "response: " APR_TIME_T_FMT "\n", info->response_time),
+        apr_psprintf(p, "status: %d" CRLF, info->status),
+        apr_psprintf(p, "date: %" APR_TIME_T_FMT CRLF, info->date),
+        apr_psprintf(p, "expire: %" APR_TIME_T_FMT CRLF, info->expire),
+        apr_psprintf(p, "request_time: %" APR_TIME_T_FMT CRLF, info->request_time),
+        apr_psprintf(p, "response_time: %" APR_TIME_T_FMT CRLF CRLF, info->response_time),
         NULL);
 }
 
@@ -208,10 +217,12 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     info = &(obj->info);
     lobj->key = ap_md5(r->pool, (unsigned char*)key);
 
-    keys[0] = apr_pstrcat(r->pool, key, ".header", NULL);
+    DDD(apr_psprintf(r->pool, "Trying to open the entity %s", lobj->key))
+
+    keys[0] = apr_pstrcat(r->pool, lobj->key, ".header", NULL);
     key_len[0] = strlen(keys[0]);
 
-    keys[1] = apr_pstrcat(r->pool, key, ".data", NULL);
+    keys[1] = apr_pstrcat(r->pool, lobj->key, ".data", NULL);
     key_len[1] = strlen(keys[1]);
 
     if (sconf->lock) {
@@ -266,7 +277,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
         return DECLINED;
     }
 
-    return OK;
+    return count ? OK : DECLINED;
 }
 
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
@@ -382,7 +393,7 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
         }
     }
 
-    lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, "\n", resp_hdrs_str, "\n", req_hdrs_str, NULL);
+    lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, resp_hdrs_str, req_hdrs_str, NULL);
     key = apr_pstrcat(r->pool, lobj->key, ".header", NULL);
 
     rv = store_pair(r, key, lobj->hdrs_str, strlen(lobj->hdrs_str) + 1, info);
