@@ -150,7 +150,7 @@ static char* serialize_cache_info(apr_pool_t *p, cache_info* info) {
         apr_psprintf(p, "date: " APR_TIME_T_FMT "\n", info->date),
         apr_psprintf(p, "expire: " APR_TIME_T_FMT "\n", info->expire),
         apr_psprintf(p, "request_time: " APR_TIME_T_FMT "\n", info->request_time),
-        apr_psprintf(p, "response: " APR_TIME_T_FMT "\n\n", info->response_time),
+        apr_psprintf(p, "response: " APR_TIME_T_FMT "\n", info->response_time),
         NULL);
 }
 
@@ -335,7 +335,7 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
         }
     }
 
-    lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, resp_hdrs_str, req_hdrs_str, NULL);
+    lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, "\n", resp_hdrs_str, "\n", req_hdrs_str, NULL);
     key = apr_pstrcat(r->pool, lobj->key, ".header", NULL);
 
     rv = store_pair(r, key, lobj->hdrs_str);
