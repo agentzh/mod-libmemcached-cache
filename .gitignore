@@ -1,0 +1,8 @@
+.libs/
+*.swp
+*.slo
+*.la
+*.lo
+*~
+*.o
+print.txt
