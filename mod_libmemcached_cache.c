@@ -33,6 +33,31 @@ static int remove_url(cache_handle_t *h, apr_pool_t *p);
 static libmem_cache_conf_t *sconf;
 
 /* implementations of the static functions */
+
+static apr_status_t store_pair(request_rec *r, char *key, char *value, size_t value_len, cache_info* info) {
+    memcached_return rc;
+    time_t expire = info->expire / MSEC_ONE_SEC;
+
+    if (sconf->lock) {
+        apr_thread_mutex_lock(sconf->lock);
+    }
+
+    rc = memcached_set(sconf->memc, key, strlen(key), value, value_len,
+            expire, (uint32_t)0);
+
+    if (sconf->lock) {
+        apr_thread_mutex_unlock(sconf->lock);
+    }
+
+    if (rc != MEMCACHED_SUCCESS) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "Failed to set the key %s to the memcached servers: %s",
+                key, memcached_strerror(sconf->memc, rc));
+        return APR_EGENERAL;
+    }
+    return APR_SUCCESS;
+}
+
 static char* serialize_table(apr_pool_t *p, apr_table_t *table) {
     struct iovec *iov;
     int nvec, nelts;
@@ -219,19 +244,15 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
                     "libmemcached_cache: Unknown key returned: %s", ret_key);
         }
     }
-    if (count > 0 && count != 2) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "libmemcached_cache: Found %d components for url %s but two was expected.", count, key);
-
-        if (sconf->lock) {
-            apr_thread_mutex_unlock(sconf->lock);
-        }
-
-        return DECLINED;
-    }
 
     if (sconf->lock) {
         apr_thread_mutex_unlock(sconf->lock);
+    }
+
+    if (count > 0 && count != 2) {
+        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Found %d components for url %s but two was expected.", count, key);
+        return DECLINED;
     }
 
     return OK;
@@ -338,7 +359,7 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
     lobj->hdrs_str = apr_pstrcat(r->pool, cache_info_str, "\n", resp_hdrs_str, "\n", req_hdrs_str, NULL);
     key = apr_pstrcat(r->pool, lobj->key, ".header", NULL);
 
-    rv = store_pair(r, key, lobj->hdrs_str);
+    rv = store_pair(r, key, lobj->hdrs_str, strlen(lobj->hdrs_str) + 1, info);
     if (rv != APR_SUCCESS) {
         return rv;
     }
@@ -352,6 +373,7 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
     char *cur;
     cache_object_t *obj = h->cache_obj;
     libmem_cache_object_t *lobj = (libmem_cache_object_t *)obj->vobj;
+    char *key;
 
     body = apr_palloc(r->pool, lobj->body_len);
     if (body == NULL) {
@@ -373,13 +395,13 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
         }
         if (len) {
             /* check for buffer overflow */
-            if ((obj->count + len) > lobj->body_len) {
+            if (obj->count + len >= lobj->body_len) {
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                    "libmemcached_cache: content overflew.");
                 len = lobj->value_len - obj->count;
-                memcpy(cur, s, len);
-                cur += len;
-                obj->count += len;
+                memcpy(cur, s, len - 1);
+                //cur += len - 1;
+                obj->count += len - 1;
                 break;
             } else {
                 memcpy(cur, s, len);
@@ -387,9 +409,10 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
                 obj->count += len;
             }
         }
-        AP_DEBUG_ASSERT(obj->count <= lobj->body_len);
+        AP_DEBUG_ASSERT(obj->count < lobj->body_len);
     }
     if (obj->count) {
+        body[obj->count] = '\0';
         if (r->connection->aborted) {
             ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
                 "libmemcached_cache: Discarding body of size %" APR_SIZE_T_FMT " bytes for URL %s "
@@ -400,14 +423,12 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
         }
         lobj->body = body;
 
-        if (lobj->hdrs_str != NULL) {
-            /* we should avoid copying body here */
-            rv = store_pair(r, lobj->key, apr_pstrcat(r->pool, lobj->hdrs_str, lobj->body, NULL));
-            if (rv != APR_SUCCESS) {
-                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                     "libmemcached_cache: Failed to store body.");
-                return rv;
-            }
+        key = apr_pstrcat(r->pool, lobj->key, ".data", NULL);
+        rv = store_pair(r, key, lobj->body, obj->count + 1, &obj->info);
+        if (rv != APR_SUCCESS) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                 "libmemcached_cache: Failed to store body.");
+            return rv;
         }
         return APR_SUCCESS;
     } else {
