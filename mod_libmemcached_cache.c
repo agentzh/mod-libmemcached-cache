@@ -6,6 +6,7 @@
 #include "util_md5.h"
 #include "mod_libmemcached_cache.h"
 
+#define dprintf apr_psprintf
 #define DEBUG
 #ifdef DEBUG
 #define DDD(x) ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "%s", (x));
@@ -24,7 +25,7 @@ module AP_MODULE_DECLARE_DATA libmemcached_cache_module;
 /* Forward declarations */
 
 static char* serialize_table(apr_pool_t *p, apr_table_t *table);
-static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_table_t *table);
+static char* read_table(request_rec *r, char *buf, apr_table_t *table);
 
 static int open_entity(cache_handle_t *h, request_rec *r, const char *key);
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r);
@@ -107,7 +108,7 @@ static char* serialize_table(apr_pool_t *p, apr_table_t *table) {
     return apr_pstrcatv(p, iov, k, NULL);
 }
 
-static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_table_t *table) {
+static char* read_table(request_rec *r, char *buf, apr_table_t *table) {
     char *l, *w, *eol;
     for (w = buf; *w != '\0'; w = eol + 1) {
         if ((eol = strstr(w, CRLF)) != NULL) {
@@ -119,6 +120,7 @@ static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_tabl
             return NULL;
         }
         if (*w == '\0') { /* found the terminal CRLF where w == eol - 1 */
+            DDD("Done reading table")
             return eol + 1;
         }
 
@@ -131,9 +133,11 @@ static char* read_table(request_rec *r, char *buf, apr_size_t buf_size, apr_tabl
             while (*l && apr_isspace(*l)) {
                 ++l;
             }
+            DDD(apr_psprintf(r->pool, "header: [%s] [%s]", w, l))
             apr_table_add(table, w, l);
         }
     }
+    DDD("Done reading table")
     return w;
 }
 
@@ -214,6 +218,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 
     h->cache_obj = obj = apr_pcalloc(r->pool, sizeof(*obj));
     obj->vobj = lobj = apr_pcalloc(r->pool, sizeof(*lobj));
+    obj->key = key;
     info = &(obj->info);
     lobj->key = ap_md5(r->pool, (unsigned char*)key);
 
@@ -260,6 +265,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
         } else if (ret_key_len == key_len[1]) {
             /* Found the data file */
             lobj->body = ret_val;
+            lobj->body_len = ret_val_len;
         } else {
             ret_key[ret_key_len - 1] = '\0';
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
@@ -271,13 +277,15 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
         apr_thread_mutex_unlock(sconf->lock);
     }
 
+    DDD(dprintf(r->pool, "We got %d items for key %s", count, key))
+
     if (count > 0 && count != 2) {
         ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
                 "libmemcached_cache: Found %d components for url %s but two was expected.", count, key);
         return DECLINED;
     }
 
-    return count ? OK : DECLINED;
+    return count == 2 ? OK : DECLINED;
 }
 
 static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
@@ -286,13 +294,9 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
     libmem_cache_object_t *lobj = (libmem_cache_object_t *) obj->vobj;
     char *cur;
 
-    if (lobj->value == NULL || lobj->value_len == 0) {
-        return APR_NOTFOUND;
-    }
-
     h->resp_hdrs = apr_table_make(r->pool, 20);
-    cur = lobj->value;
-    cur = read_table(r, cur, lobj->value_len, h->resp_hdrs);
+    cur = lobj->hdrs_str;
+    cur = read_table(r, cur, h->resp_hdrs);
     if (cur == NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "libmemcached_cache: Failed to parse response headers from the cache.");
@@ -300,7 +304,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
     }
 
     h->req_hdrs = apr_table_make(r->pool, 20);
-    cur = read_table(r, cur, lobj->value_len - (cur - lobj->value), h->req_hdrs);
+    cur = read_table(r, cur, h->req_hdrs);
     if (cur == NULL) {
         ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
             "libmemcached_cache: Failed to parse request headers from the cache.");
@@ -316,6 +320,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 static apr_status_t recall_body(cache_handle_t *h, apr_pool_t *p, apr_bucket_brigade *bb) {
     apr_bucket *b;
     libmem_cache_object_t *lobj = (libmem_cache_object_t*) h->cache_obj->vobj;
+    //DDD("Recalling body...")
 
     b = apr_bucket_immortal_create(
             lobj->body, lobj->body_len - 1 /* exclude terminal '\0' */,
