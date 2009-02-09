@@ -3,9 +3,15 @@
 #include "util_script.h"
 #include "ap_config.h"
 #include "ap_mpm.h"
+#include "util_md5.h"
 #include "mod_libmemcached_cache.h"
 
-#define DDD(x) fprintf(stderr, "%s: line %d: %s", __FILE__, __LINE__, (x));
+#define DEBUG
+#ifdef DEBUG
+#define DDD(x) ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "%s", (x));
+#else
+#define DDD(X) ;
+#endif
 
 enum {
     DEFAULT_MIN_CACHE_OBJECT_SIZE = 1,
@@ -44,8 +50,11 @@ static apr_status_t store_pair(request_rec *r, char *key, char *value, size_t va
         apr_thread_mutex_lock(sconf->lock);
     }
 
-    rc = memcached_set(sconf->memc, key, strlen(key), value, value_len,
-            expire, (uint32_t)0);
+    //rc = memcached_set(sconf->memc, key, strlen(key), "hello", 6,
+            //expire, (uint32_t)0);
+    DDD("Adding abc : hello");
+    rc = memcached_set(sconf->memc, "abc", strlen("abc"), "hello", 6,
+            (time_t)30, (uint32_t)0);
 
     if (sconf->lock) {
         apr_thread_mutex_unlock(sconf->lock);
@@ -197,7 +206,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     h->cache_obj = obj = apr_pcalloc(r->pool, sizeof(*obj));
     obj->vobj = lobj = apr_pcalloc(r->pool, sizeof(*lobj));
     info = &(obj->info);
-    //lobj->key = md5(key);
+    lobj->key = ap_md5(r->pool, (unsigned char*)key);
 
     keys[0] = apr_pstrcat(r->pool, key, ".header", NULL);
     key_len[0] = strlen(keys[0]);
@@ -315,7 +324,7 @@ static apr_status_t create_entity(cache_handle_t *h, request_rec *r, const char 
     h->cache_obj = obj = apr_pcalloc(r->pool, sizeof(*obj));
     obj->vobj = lobj = apr_pcalloc(r->pool, sizeof(*lobj));
     obj->key = apr_pstrdup(r->pool, key);
-    //lobj->key = md5(obj->key);
+    lobj->key = ap_md5(r->pool, (unsigned char*)obj->key);
 
     if (len == -1) {
         len = sconf->max_streaming_buffer_size;
@@ -384,30 +393,38 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
 }
 
 static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
-    char *body;
-    apr_bucket *e;
+    apr_bucket *b;
     apr_status_t rv;
     char *cur;
     cache_object_t *obj = h->cache_obj;
     libmem_cache_object_t *lobj = (libmem_cache_object_t *)obj->vobj;
     char *key;
+    int eos = 0;
 
-    body = apr_palloc(r->pool, lobj->body_len);
-    if (body == NULL) {
-        return APR_ENOMEM;
+    if (lobj->body == NULL) {
+        lobj->body = apr_pcalloc(r->pool, lobj->body_len);
+        if (lobj->body == NULL) {
+            return APR_ENOMEM;
+        }
+        obj->count = 0;
     }
-    obj->count = 0;
-    cur = (char*)body + obj->count;
-    for (e = APR_BRIGADE_FIRST(bb);
-            e != APR_BRIGADE_SENTINEL(bb); e = APR_BUCKET_NEXT(e)) {
+    cur = lobj->body + obj->count;
+    for (b = APR_BRIGADE_FIRST(bb);
+            b != APR_BRIGADE_SENTINEL(bb); b = APR_BUCKET_NEXT(b)) {
         const char *s;
         apr_size_t len;
 
-        if (APR_BUCKET_IS_EOS(e)) {
+        DDD("Reading the next bucket...")
+        if (APR_BUCKET_IS_EOS(b)) {
+            eos = 1;
             break;
         }
-        rv = apr_bucket_read(e, &s, &len, APR_BLOCK_READ);
+
+        rv = apr_bucket_read(b, &s, &len, APR_BLOCK_READ);
         if (rv != APR_SUCCESS) {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "cache_disk: Error when reading bucket for URL %s",
+                obj->key);
             return rv;
         }
         if (len) {
@@ -428,31 +445,33 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
         }
         AP_DEBUG_ASSERT(obj->count < lobj->body_len);
     }
-    if (obj->count) {
-        body[obj->count] = '\0';
-        if (r->connection->aborted) {
-            ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
-                "libmemcached_cache: Discarding body of size %" APR_SIZE_T_FMT " bytes for URL %s "
-                "even though connection has been aborted.",
-                obj->count,
-                obj->key);
+    if (eos) {
+        if (obj->count) {
+            lobj->body[obj->count] = '\0';
+            if (r->connection->aborted) {
+                ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
+                    "libmemcached_cache: Discarding body of size %" APR_SIZE_T_FMT " bytes for URL %s "
+                    "even though connection has been aborted.",
+                    obj->count,
+                    obj->key);
+                return APR_EGENERAL;
+            }
+
+            key = apr_pstrcat(r->pool, lobj->key, ".data", NULL);
+            rv = store_pair(r, key, lobj->body, obj->count + 1, &obj->info);
+            if (rv != APR_SUCCESS) {
+                ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                     "libmemcached_cache: Failed to store body.");
+                return rv;
+            }
+            return APR_SUCCESS;
+        } else {
+            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
+                "libmemcached_cache: No output seen for body.");
             return APR_EGENERAL;
         }
-        lobj->body = body;
-
-        key = apr_pstrcat(r->pool, lobj->key, ".data", NULL);
-        rv = store_pair(r, key, lobj->body, obj->count + 1, &obj->info);
-        if (rv != APR_SUCCESS) {
-            ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                 "libmemcached_cache: Failed to store body.");
-            return rv;
-        }
-        return APR_SUCCESS;
-    } else {
-        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-            "libmemcached_cache: No output seen for body.");
-        return APR_EGENERAL;
     }
+    return APR_SUCCESS;
 }
 
 /* Configuration and start-up */
@@ -468,7 +487,7 @@ static apr_status_t cleanup_memcached_servers(void *obj) {
 
 static void* create_cache_config(apr_pool_t *p, server_rec *s) {
     sconf = apr_pcalloc(p, sizeof(libmem_cache_conf_t));
-    DDD("sconf initialized!");
+    //DDD("sconf initialized!");
     sconf->max_cache_object_size = DEFAULT_MAX_CACHE_OBJECT_SIZE;
     sconf->min_cache_object_size = DEFAULT_MIN_CACHE_OBJECT_SIZE;
     sconf->max_streaming_buffer_size = DEFAULT_MAX_STREAMING_BUFFER_SIZE;
