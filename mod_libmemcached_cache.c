@@ -5,6 +5,8 @@
 #include "ap_mpm.h"
 #include "mod_libmemcached_cache.h"
 
+#define DDD(x) fprintf(stderr, "%s: line %d: %s", __FILE__, __LINE__, (x));
+
 enum {
     DEFAULT_MIN_CACHE_OBJECT_SIZE = 1,
     DEFAULT_MAX_CACHE_OBJECT_SIZE = 1024 * 1024,
@@ -466,6 +468,7 @@ static apr_status_t cleanup_memcached_servers(void *obj) {
 
 static void* create_cache_config(apr_pool_t *p, server_rec *s) {
     sconf = apr_pcalloc(p, sizeof(libmem_cache_conf_t));
+    DDD("sconf initialized!");
     sconf->max_cache_object_size = DEFAULT_MAX_CACHE_OBJECT_SIZE;
     sconf->min_cache_object_size = DEFAULT_MIN_CACHE_OBJECT_SIZE;
     sconf->max_streaming_buffer_size = DEFAULT_MAX_STREAMING_BUFFER_SIZE;
@@ -549,18 +552,59 @@ static int remove_entity(cache_handle_t *h) {
     return OK;
 }
 
+static const char *set_max_cache_object_size(cmd_parms *parms, void *in_struct_ptr, const char *arg)
+{
+    apr_size_t val;
+
+    if (sscanf(arg, "%" APR_SIZE_T_FMT, &val) != 1) {
+        return "LibmemCacheMaxObjectSize value must be an integer (bytes)";
+    }
+    sconf->max_cache_object_size = val;
+    return NULL;
+}
+
+static const char *set_min_cache_object_size(cmd_parms *parms, void *in_struct_ptr, const char *arg)
+{
+    apr_size_t val;
+
+    if (sscanf(arg, "%" APR_SIZE_T_FMT, &val) != 1) {
+        return "LibmemCacheMinObjectSize value must be an integer (bytes)";
+    }
+    sconf->min_cache_object_size = val;
+    return NULL;
+}
+
+static const char *set_max_streaming_buffer(cmd_parms *parms, void *dummy,
+                                            const char *arg)
+{
+    apr_size_t val;
+
+    if (sscanf(arg, "%" APR_SIZE_T_FMT, &val) != 1) {
+        return "LibmemCacheMaxStreamingBuffer value must be an integer (bytes)";
+    }
+    sconf->max_streaming_buffer_size = val;
+    return NULL;
+}
+
+static const char *set_memc_servers(cmd_parms *parms, void *dummy,
+                                            const char *arg)
+{
+    sconf->memc_servers = apr_pstrdup(parms->pool, arg);
+    return NULL;
+}
+
+
 static const command_rec cache_cmds[] = {
-    AP_INIT_TAKE1("LibmemCacheMinObjectSize", ap_set_int_slot,
-        (void*)APR_OFFSETOF(libmem_cache_conf_t, min_cache_object_size), RSRC_CONF,
+    AP_INIT_TAKE1("LibmemCacheMinObjectSize", set_min_cache_object_size, NULL, RSRC_CONF,
         "The minimum size (in bytes) of an object to be placed in the cache."),
-    AP_INIT_TAKE1("LibmemCacheMaxObjectSize", ap_set_int_slot,
-        (void*)APR_OFFSETOF(libmem_cache_conf_t, max_cache_object_size), RSRC_CONF,
+    AP_INIT_TAKE1("LibmemCacheMaxObjectSize", set_max_cache_object_size, NULL, RSRC_CONF,
         "The maximum size (in bytes) of an object to be placed in the cache."),
-    AP_INIT_TAKE1("LibmemCacheMaxStreamingBuffer", ap_set_int_slot,
-        (void*)APR_OFFSETOF(libmem_cache_conf_t, max_streaming_buffer_size), RSRC_CONF,
+    AP_INIT_TAKE1("LibmemCacheMaxStreamingBuffer", set_max_streaming_buffer, NULL, RSRC_CONF,
         "The maximum buffer size for streaming objects."),
-    AP_INIT_TAKE1("LibmemCacheServers", ap_set_string_slot,
+    /*AP_INIT_TAKE1("LibmemCacheServers", ap_set_string_slot,
         (void*)APR_OFFSETOF(libmem_cache_conf_t, memc_servers), RSRC_CONF,
+        "The memcached server list for the underlying cache."), */
+    AP_INIT_TAKE1("LibmemCacheServers", set_memc_servers, NULL, RSRC_CONF,
         "The memcached server list for the underlying cache."),
     {NULL}
 };
