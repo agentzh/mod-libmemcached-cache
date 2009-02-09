@@ -18,7 +18,10 @@ typedef struct libmem_cache_object {
 typedef struct libmem_cache_conf {
     apr_thread_mutex_t *lock;
     memcached_st *memc;
+    apr_size_t min_cache_object_size;
     apr_size_t max_cache_object_size;
+    apr_size_t max_streaming_buffer_size;
+    char* memc_servers;
 } libmem_cache_conf_t;
 
 #endif /* MOD_LIBMEMCACHED_CACHE_H_ */

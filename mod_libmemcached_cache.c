@@ -1,7 +1,15 @@
 #include "apr_strings.h"
 #include "util_filter.h"
 #include "util_script.h"
+#include "ap_config.h"
+#include "ap_mpm.h"
 #include "mod_libmemcached_cache.h"
+
+enum {
+    DEFAULT_MIN_CACHE_OBJECT_SIZE = 1,
+    DEFAULT_MAX_CACHE_OBJECT_SIZE = 1024 * 1024,
+    DEFAULT_MAX_STREAMING_BUFFER_SIZE = 1024 * 1024
+};
 
 module AP_MODULE_DECLARE_DATA libmemcached_cache_module;
 
@@ -124,7 +132,7 @@ static apr_status_t recall_headers(cache_handle_t *h, request_rec *r) {
 static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info *info) {
     apr_status_t rv;
     libmem_cache_object_t *lobj = (libmem_cache_object_t *) h->cache_obj->vobj;
-    char *key, *resp_hdrs_str, *req_hdrs_str;
+    char *resp_hdrs_str, *req_hdrs_str;
 
     h->cache_obj->info = *info;
 
@@ -171,7 +179,7 @@ static apr_status_t store_headers(cache_handle_t *h, request_rec *r, cache_info 
     return APR_SUCCESS;
 }
 
-static store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
+static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
     char *body;
     apr_bucket *e;
     apr_status_t rv;
@@ -179,8 +187,7 @@ static store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
     cache_object_t *obj = h->cache_obj;
     libmem_cache_object_t *lobj = (libmem_cache_object_t *)obj->vobj;
 
-    body = malloc(lobj->body_len);
-    apr_pool_cleanup_register(r->pool, body, free, apr_pool_cleanup_null);
+    body = apr_palloc(r->pool, lobj->body_len);
     if (body == NULL) {
         return APR_ENOMEM;
     }
@@ -217,14 +224,12 @@ static store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
         AP_DEBUG_ASSERT(obj->count <= lobj->body_len);
     }
     if (obj->count) {
-        const char *key;
         if (r->connection->aborted) {
             ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
-                "libmemcached_cache: Discarding body of size %" APR_OFF_T_FMT " bytes for URL %s "
+                "libmemcached_cache: Discarding body of size %" APR_SIZE_T_FMT " bytes for URL %s "
                 "even though connection has been aborted.",
                 obj->count,
                 obj->key);
-            libmem_cache_errorcleanup(lobj, r);
             return APR_EGENERAL;
         }
         lobj->body = body;
@@ -232,8 +237,6 @@ static store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
         if (lobj->hdrs_str != NULL) {
             /* we should avoid copying body here */
             rv = store_pair(r, lobj->key, apr_pstrcat(r->pool, lobj->hdrs_str, lobj->body, NULL));
-            apr_pool_cleanup_kill(r->pool, (void*)body, free);
-            free(body);
             if (rv != APR_SUCCESS) {
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                      "libmemcached_cache: Failed to store body.");
@@ -247,4 +250,137 @@ static store_body(cache_handle_t *h, request_rec *r, apr_bucket_brigade *bb) {
         return APR_EGENERAL;
     }
 }
+
+/* Configuration and start-up */
+static apr_status_t cleanup_memcached(void *obj) {
+    memcached_free( (memcached_st*) obj );
+    return APR_SUCCESS;
+}
+
+static apr_status_t cleanup_memcached_servers(void *obj) {
+    memcached_server_free( (memcached_server_st*) obj );
+    return APR_SUCCESS;
+}
+
+static void* create_cache_config(apr_pool_t *p, server_rec *s) {
+    sconf = apr_pcalloc(p, sizeof(libmem_cache_conf_t));
+    sconf->max_cache_object_size = DEFAULT_MAX_CACHE_OBJECT_SIZE;
+    sconf->min_cache_object_size = DEFAULT_MIN_CACHE_OBJECT_SIZE;
+    sconf->max_streaming_buffer_size = DEFAULT_MAX_STREAMING_BUFFER_SIZE;
+    return sconf;
+}
+
+static int libmem_cache_post_config(apr_pool_t *p, apr_pool_t *plog,
+        apr_pool_t *ptemp, server_rec *s) {
+    int threaded_mpm;
+    memcached_server_st *servers;
+    memcached_return rc;
+
+    /* Sanity check the cache configuration */
+    if (sconf->min_cache_object_size >= sconf->max_cache_object_size) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
+                "LibmemCacheMaxObjectSize must be greater than LibmemCacheMinObjectSize.");
+        return DONE;
+    }
+    if (sconf->max_streaming_buffer_size > sconf->max_cache_object_size) {
+        /* Issue a notice only if something other than the default config
+         * is being used */
+        if (sconf->max_streaming_buffer_size != DEFAULT_MAX_STREAMING_BUFFER_SIZE &&
+            sconf->max_cache_object_size != DEFAULT_MAX_CACHE_OBJECT_SIZE) {
+            ap_log_error(APLOG_MARK, APLOG_NOTICE, 0, s,
+                         "LibmemCacheMaxStreamingBuffer must be less than or equal to LibmemCacheMaxObjectSize. "
+                         "Resetting LibmemCacheMaxStreamingBuffer to LibmemCacheMaxObjectSize.");
+        }
+        sconf->max_streaming_buffer_size = sconf->max_cache_object_size;
+    }
+    if (sconf->max_streaming_buffer_size < sconf->min_cache_object_size) {
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, s,
+                     "LibmemCacheMaxStreamingBuffer must be greater than or equal to LibmemCacheMinObjectSize. "
+                     "Resetting LibmemCacheMaxStreamingBuffer to LibmemCacheMinObjectSize.");
+        sconf->max_streaming_buffer_size = sconf->min_cache_object_size;
+    }
+    if (sconf->memc_servers == NULL || sconf->memc_servers[0] == '\0' ) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
+                "LibmemCacheServers must be specified.");
+        return DONE;
+    }
+
+    ap_mpm_query(AP_MPMQ_IS_THREADED, &threaded_mpm);
+    if (threaded_mpm) {
+        apr_thread_mutex_create(&sconf->lock, APR_THREAD_MUTEX_DEFAULT, p);
+    }
+
+    sconf->memc = memcached_create(NULL);
+    if (sconf->memc == NULL) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
+                "LibmemCache: Failed to create the memcached_st object.");
+        return DONE;
+    }
+    apr_pool_cleanup_register(p, sconf->memc, cleanup_memcached, apr_pool_cleanup_null);
+
+    servers = memcached_servers_parse(sconf->memc_servers);
+    if (servers == NULL) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
+                "Failed to create the memcached_server_st object by parsing the server list string %s", sconf->memc_servers);
+        return DONE;
+    }
+    apr_pool_cleanup_register(p, servers, cleanup_memcached_servers, apr_pool_cleanup_null);
+
+    rc = memcached_server_push(sconf->memc, servers);
+    if (rc != MEMCACHED_SUCCESS) {
+        ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
+                "Failed to push servers into the memcached_st object: %s", memcached_strerror(sconf->memc, rc));
+        return DONE;
+    }
+    memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_VERIFY_KEY, 1);
+
+    return OK;
+}
+
+static int remove_url(cache_handle_t *h, apr_pool_t *p) {
+    /* stub */
+    return OK;
+}
+
+static const command_rec cache_cmds[] = {
+    AP_INIT_TAKE1("LibmemCacheMinObjectSize", ap_set_int_slot,
+        (void*)APR_OFFSETOF(libmem_cache_conf_t, min_cache_object_size), RSRC_CONF,
+        "The minimum size (in bytes) of an object to be placed in the cache."),
+    AP_INIT_TAKE1("LibmemCacheMaxObjectSize", ap_set_int_slot,
+        (void*)APR_OFFSETOF(libmem_cache_conf_t, max_cache_object_size), RSRC_CONF,
+        "The maximum size (in bytes) of an object to be placed in the cache."),
+    AP_INIT_TAKE1("LibmemCacheMaxStreamingBuffer", ap_set_int_slot,
+        (void*)APR_OFFSETOF(libmem_cache_conf_t, max_streaming_buffer_size), RSRC_CONF,
+        "The maximum buffer size for streaming objects."),
+    AP_INIT_TAKE1("LibmemCacheServers", ap_set_string_slot,
+        (void*)APR_OFFSETOF(libmem_cache_conf_t, memc_servers), RSRC_CONF,
+        "The memcached server list for the underlying cache."),
+    {NULL}
+};
+
+static const cache_provider cache_libmem_provider = {
+    &remove_entity,
+    &store_headers,
+    &store_body,
+    &recall_headers,
+    &recall_body,
+    &create_entity,
+    &open_entity,
+    &remove_url,
+};
+
+static void register_hooks(apr_pool_t *p) {
+    ap_hook_post_config(libmem_cache_post_config, NULL, NULL, APR_HOOK_MIDDLE);
+    ap_register_provider(p, CACHE_PROVIDER_GROUP, "libmemcached", "0", &cache_libmem_provider);
+}
+
+module AP_MODULE_DECLARE_DATA libmemcached_cache_module = {
+    STANDARD20_MODULE_STUFF,
+    NULL,
+    NULL,
+    create_cache_config,
+    NULL,
+    cache_cmds,
+    register_hooks
+};
 

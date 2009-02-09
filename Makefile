@@ -8,7 +8,7 @@ target = mod_libmemcached_cache.la
 all: $(target)
 
 $(target): mod_libmemcached_cache.c mod_libmemcached_cache.h
-	$(APXS) -L$(LIBMEMCACHED_LIB) -lmemcached -I$(MOD_CACHE_SRC_DIR) -I$(LIBMEMCACHED_INCLUDE) -c $<
+	RUNPATH=$(LIBMEMCACHED_LIB) $(APXS) -L$(LIBMEMCACHED_LIB) -lmemcached -I$(MOD_CACHE_SRC_DIR) -I$(LIBMEMCACHED_INCLUDE) -c $<
 
 install: all
 	$(APXS) -a -i -n c $(target)
