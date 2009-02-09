@@ -7,7 +7,7 @@
 #include "mod_libmemcached_cache.h"
 
 #define dprintf apr_psprintf
-#define DEBUG
+/* #define DEBUG */
 #ifdef DEBUG
 #define DDD(x) ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, r->server, "%s", (x));
 #else
