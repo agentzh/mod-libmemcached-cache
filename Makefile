@@ -13,3 +13,7 @@ $(target): mod_libmemcached_cache.c mod_libmemcached_cache.h
 install: all
 	$(APXS) -a -i -n libmemcached_cache $(target)
 
+clean:
+	-rm -rf .libs
+	-rm *.slo *.la *.lo *.o
+
