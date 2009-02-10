@@ -54,6 +54,7 @@ static apr_status_t store_pair(request_rec *r, char *key, char *value, size_t va
     }
 
     if (sconf->lock) {
+        //DDD("Locking...");
         apr_thread_mutex_lock(sconf->lock);
     }
 
@@ -174,13 +175,13 @@ static char* parse_cache_info(request_rec *r, char *buf, cache_info* info) {
             if (strcmp(w, "status") == 0) {
                 info->status = atoi(l);
             } else if (strcmp(w, "date") == 0) {
-                info->date = apr_atoi64(l);
+                info->date = apr_atoi64(l) * MSEC_ONE_SEC;
             } else if (strcmp(w, "expire") == 0) {
-                info->expire = apr_atoi64(l);
+                info->expire = apr_atoi64(l) * MSEC_ONE_SEC;
             } else if (strcmp(w, "request_time") == 0) {
-                info->request_time = apr_atoi64(l);
+                info->request_time = apr_atoi64(l) * MSEC_ONE_SEC;
             } else if (strcmp(w, "response_time") == 0) {
-                info->response_time = apr_atoi64(l);
+                info->response_time = apr_atoi64(l) * MSEC_ONE_SEC;
             } else {
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                   "libmemcached_cache: Unknown cache info field: %s (Only 'status', 'date', 'expire', 'request_time', and 'response_time' are expected.)", w);
@@ -196,10 +197,14 @@ static char* serialize_cache_info(apr_pool_t *p, cache_info* info) {
     return apr_pstrcat(
         p,
         apr_psprintf(p, "status: %d" CRLF, info->status),
-        apr_psprintf(p, "date: %" APR_TIME_T_FMT CRLF, info->date),
-        apr_psprintf(p, "expire: %" APR_TIME_T_FMT CRLF, info->expire),
-        apr_psprintf(p, "request_time: %" APR_TIME_T_FMT CRLF, info->request_time),
-        apr_psprintf(p, "response_time: %" APR_TIME_T_FMT CRLF CRLF, info->response_time),
+        apr_psprintf(p, "date: %" APR_TIME_T_FMT CRLF,
+            info->date / MSEC_ONE_SEC),
+        apr_psprintf(p, "expire: %" APR_TIME_T_FMT CRLF,
+            info->expire / MSEC_ONE_SEC),
+        apr_psprintf(p, "request_time: %" APR_TIME_T_FMT CRLF,
+            info->request_time / MSEC_ONE_SEC),
+        apr_psprintf(p, "response_time: %" APR_TIME_T_FMT CRLF CRLF,
+            info->response_time / MSEC_ONE_SEC),
         NULL);
 }
 
@@ -231,6 +236,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     key_len[1] = strlen(keys[1]);
 
     if (sconf->lock) {
+        //DDD("Locking...");
         apr_thread_mutex_lock(sconf->lock);
     }
 
@@ -252,7 +258,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
                 &ret_val_len, &flags, &rc))) {
         count++;
         apr_pool_cleanup_register(r->pool, ret_val, free_pointer, apr_pool_cleanup_null);
-        ret_val[ret_val_len - 1] = '\0'; /* prevent memory overflow */
+        //ret_val[ret_val_len - 1] = '\0'; /* prevent memory overflow */
         if (ret_key_len == key_len[0]) {
             /* Found the header file */
             char *p = parse_cache_info(r, ret_val, info);
@@ -572,7 +578,8 @@ static int libmem_cache_post_config(apr_pool_t *p, apr_pool_t *plog,
                 "Failed to push servers into the memcached_st object: %s", memcached_strerror(sconf->memc, rc));
         return DONE;
     }
-    memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_VERIFY_KEY, 1);
+    //memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_VERIFY_KEY, 1);
+    //memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_NO_BLOCK, 1);
 
     return OK;
 }
