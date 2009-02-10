@@ -1,6 +1,7 @@
 MOD_CACHE_SRC_DIR=../httpd-2.2.11/modules/cache
-LIBMEMCACHED_INCLUDE=/opt/libmemcached/include
-LIBMEMCACHED_LIB=/opt/libmemcached/lib
+LIBMEMCACHED=/opt/libmemcached
+LIBMEMCACHED_INCLUDE=$(LIBMEMCACHED)/include
+LIBMEMCACHED_LIB=$(LIBMEMCACHED)/lib
 APXS=/opt/apache2/bin/apxs
 
 target = mod_libmemcached_cache.la

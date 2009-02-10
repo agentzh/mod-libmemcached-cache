@@ -578,6 +578,9 @@ static int libmem_cache_post_config(apr_pool_t *p, apr_pool_t *plog,
                 "Failed to push servers into the memcached_st object: %s", memcached_strerror(sconf->memc, rc));
         return DONE;
     }
+    ap_log_error(APLOG_MARK, APLOG_DEBUG, 0, s,
+            "Found %d memcached servers.",
+            memcached_server_count(sconf->memc));
     //memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_VERIFY_KEY, 1);
     //memcached_behavior_set(sconf->memc, MEMCACHED_BEHAVIOR_NO_BLOCK, 1);
 
@@ -646,7 +649,7 @@ static const command_rec cache_cmds[] = {
     /*AP_INIT_TAKE1("LibmemCacheServers", ap_set_string_slot,
         (void*)APR_OFFSETOF(libmem_cache_conf_t, memc_servers), RSRC_CONF,
         "The memcached server list for the underlying cache."), */
-    AP_INIT_TAKE1("LibmemCacheServers", set_memc_servers, NULL, RSRC_CONF,
+    AP_INIT_RAW_ARGS("LibmemCacheServers", set_memc_servers, NULL, RSRC_CONF,
         "The memcached server list for the underlying cache."),
     {NULL}
 };

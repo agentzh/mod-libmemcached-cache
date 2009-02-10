@@ -1,0 +1,44 @@
+To build this Apache 2.x module, you need to install libmemcached first:
+
+Download the latest version of libmemcached tarball from below:
+
+   http://tangent.org/553/default.html
+
+Say, that we have libmemcached-0.26.tar.gz downloaded, use the following commands to build and install it to /opt/libmemcached or somewhere else:
+
+    tar xzvf libmemcached-0.26.tar.gz
+    cd libmemcached-0.26/
+    ./configure --prefix=/opt/libmemcached
+    make -j2
+    sudo make install
+
+And you'll also need the Apache source tree since Apache does not install mod_cache.h into the target directory but this module needs it.
+
+To build this module, just type one command:
+
+    make MOD_CACHE_SRC_DIR=/path/to/httpd-2.x.x/modules/cache \
+        LIBMEMCACHED_INCLUDE=/opt/libmemcached/include \
+        LIBMEMCACHED_LIB=/opt/libmemcached/lib \
+        APXS=/opt/apache2/bin/apxs
+
+where we assumed you install libmemcached to /opt/libmemcached and apache2 to /opt/apache2. If it's not the case, just change the paths correspondingly.
+
+Sample httpd.conf configuration:
+
+  # you don't need the following line if you've already had mod_cache static linked into your Apache build
+  LoadModule cache_module modules/mod_cache.so
+
+  LoadModule libmemcached_cache_module modules/mod_libmemcached_cache.so
+
+  # Config of libmemcached_cache:
+  CacheEnable libmemcached /
+  LibmemCacheServers foo.com, bar.org:54321
+
+Note that comma is required to seperate those memcached servers. Pure spaces won't work.
+
+Some other configuration directives should also work but not tested yet:
+
+  LibmemCacheMaxObjectSize 1048576
+  LibmemCacheMinObjectSize 1
+  LibmemCacheMaxStreamingBuffer 1048576
+
