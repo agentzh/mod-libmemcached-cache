@@ -559,7 +559,7 @@ static int libmem_cache_post_config(apr_pool_t *p, apr_pool_t *plog,
     sconf->memc = memcached_create(NULL);
     if (sconf->memc == NULL) {
         ap_log_error(APLOG_MARK, APLOG_CRIT, 0, s,
-                "LibmemCache: Failed to create the memcached_st object.");
+                "libmemcached_cache: Failed to create the memcached_st object.");
         return DONE;
     }
     apr_pool_cleanup_register(p, sconf->memc, cleanup_memcached, apr_pool_cleanup_null);
