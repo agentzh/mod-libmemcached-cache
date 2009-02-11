@@ -445,7 +445,7 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
         rv = apr_bucket_read(b, &s, &len, APR_BLOCK_READ);
         if (rv != APR_SUCCESS) {
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
-                "cache_disk: Error when reading bucket for URL %s",
+                "libmemcached_cache: Error when reading bucket for URL %s",
                 obj->key);
             return rv;
         }
