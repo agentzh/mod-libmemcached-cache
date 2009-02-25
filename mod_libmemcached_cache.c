@@ -291,7 +291,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
         } else if (ret_key_len == key_len[1]) {
             /* Found the data file */
             lobj->body = ret_val;
-            lobj->body_len = ret_val_len;
+            lobj->body_len = ret_val_len + 1;
         } else {
             ret_key[ret_key_len - 1] = '\0';
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
