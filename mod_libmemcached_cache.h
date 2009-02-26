@@ -23,6 +23,8 @@
 #include "ap_provider.h"
 #include <libmemcached/memcached.h>
 
+#define MOD_LIBMEMCACHED_CACHE_VERSION "0.0.1"
+
 typedef struct libmem_cache_object {
     char* key;  /* memcached MD5 key for the canonicalized url */
     apr_size_t key_len;  /* memcached MD5 key length */
