@@ -155,7 +155,7 @@ static char* read_table(request_rec *r, char *buf, apr_table_t *table) {
                 ++l;
             }
             DDD(apr_psprintf(r->pool, "header: [%s] [%s]", w, l))
-            apr_table_add(table, w, l);
+            apr_table_addn(table, w, l);
         }
     }
     DDD("Done reading table")
@@ -493,7 +493,7 @@ static apr_status_t store_body(cache_handle_t *h, request_rec *r, apr_bucket_bri
             if (r->connection->aborted) {
                 ap_log_error(APLOG_MARK, APLOG_INFO, 0, r->server,
                     "libmemcached_cache: Discarding body of size %" APR_SIZE_T_FMT " bytes for URL %s "
-                    "even though connection has been aborted.",
+                    "because the connection has been aborted.",
                     obj->count,
                     obj->key);
                 return APR_EGENERAL;
