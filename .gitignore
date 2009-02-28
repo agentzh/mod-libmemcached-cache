@@ -6,3 +6,6 @@
 *~
 *.o
 print.txt
+.rsync
+*.tar.gz
+dist
