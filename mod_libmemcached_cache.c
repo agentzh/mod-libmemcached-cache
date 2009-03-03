@@ -293,7 +293,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
             lobj->body = ret_val;
             lobj->body_len = ret_val_len + 1;
         } else {
-            ret_key[ret_key_len - 1] = '\0';
+            /* ret_key[ret_key_len - 1] = '\0'; */
             ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                     "libmemcached_cache: Unknown key returned: %s", ret_key);
         }
