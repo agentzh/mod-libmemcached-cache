@@ -233,6 +233,8 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     cache_info *info;
     libmem_cache_object_t *lobj;
     memcached_return rc;
+    int found_header = 0;
+    int found_body = 0;
     char *keys[2];
     size_t key_len[2];
     uint32_t flags;
@@ -262,7 +264,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
 
     rc = memcached_mget(sconf->memc, keys, key_len, 2);
     if (rc != MEMCACHED_SUCCESS) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                 "libmemcached_cache: Failed to call memcached_mget: %s",
                 memcached_strerror(sconf->memc, rc));
 
@@ -282,6 +284,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
         if (ret_key_len == key_len[0]) {
             /* Found the header file */
             char *p = parse_cache_info(r, ret_val, info);
+            found_header = 1;
             if (p == NULL) {
                 ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r,
                         "libmemcached_cache: Failed to parse the info record in the header file.");
@@ -290,6 +293,7 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
             lobj->hdrs_str = p;
         } else if (ret_key_len == key_len[1]) {
             /* Found the data file */
+            found_body = 1;
             lobj->body = ret_val;
             lobj->body_len = ret_val_len + 1;
         } else {
@@ -306,8 +310,16 @@ static int open_entity(cache_handle_t *h, request_rec *r, const char *key) {
     DDD(dprintf(r->pool, "We got %d items for key %s", count, key))
 
     if (count > 0 && count != 2) {
-        ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
-                "libmemcached_cache: Found %d components for url %s but two was expected.", count, key);
+        if (!found_header) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Found %d component(s) for url %s but two was expected (header not found).", count, key);
+        } else if (!found_body) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Found %d component(s) for url %s but two was expected (body not found).", count, key);
+        } else {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r,
+                "libmemcached_cache: Found %d component(s) for url %s but two was expected.", count, key);
+        }
         return DECLINED;
     }
 
