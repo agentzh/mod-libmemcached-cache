@@ -25,16 +25,18 @@ target = mod_libmemcached_cache.la
 
 all: local-shared-build
 
-clean:
+clean: force
 	-rm -rf .libs dist
 	-rm *.slo *.la *.lo *.o *.tar *.tar.gz
 
-dist:
-	-rm -rf dist
-	-mkdir dist
+dist: force
+	-rm -rf $(dist_name)
+	-mkdir $(dist_name)
 	echo $(version)
-	cp *.c *.h README LICENSE *.mk .deps Makefile dist/
-	tar cvf $(dist_name).tar dist/
+	cp *.c *.h README LICENSE *.mk .deps Makefile $(dist_name)
+	tar cvf $(dist_name).tar $(dist_name)
 	gzip -f --best $(dist_name).tar
 	@echo $(dist_name).tar.gz generated.
+
+force:
 
