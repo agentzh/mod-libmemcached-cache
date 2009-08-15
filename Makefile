@@ -15,7 +15,7 @@ include ${top_builddir}/build/special.mk
 
 APXS      = apxs
 APACHECTL = apachectl
-EXTRA_CFLAGS = -I$(builddir) -L$(LIBMEMCACHED_LIB) -lmemcached -I$(MOD_CACHE_SRC_DIR) -I$(LIBMEMCACHED_INCLUDE) 
+EXTRA_CFLAGS = -I$(builddir) -L$(LIBMEMCACHED_LIB) -lmemcached -I$(MOD_CACHE_SRC_DIR) -I$(LIBMEMCACHED_INCLUDE)
 
 version=`grep 'MOD_LIBMEMCACHED_CACHE_VERSION' mod_libmemcached_cache.h | sed 's/.*"\(.*\)".*/\1/'`
 
